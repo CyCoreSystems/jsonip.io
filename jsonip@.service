@@ -1,21 +1,11 @@
 [Unit]
-Description=%p - %i
-After=docker.service
+Description=jsonip.io
+After=network.target
 
 [Service]
-EnvironmentFile=/etc/environment
-Environment=DOCKERIMAGE=ulexus/jsonip
-Environment=PORT=9008
-ExecStartPre=-/usr/bin/docker pull ${DOCKERIMAGE}
-ExecStartPre=-/usr/bin/docker pull ibuildthecloud/systemd-docker
-ExecStartPre=-/usr/bin/docker run --rm -v /opt/bin:/opt/bin ibuildthecloud/systemd-docker
-ExecStart=/opt/bin/systemd-docker --env run --rm --name %p -p ${PORT}:${PORT} ${DOCKERIMAGE}
+ExecStart=/root/jsonip -port 80 -tls
 Restart=always
-RestartSec=10s
-Type=notify
-NotifyAccess=all
-TimeoutStartSec=120
-TimeoutStopSec=15
+RestartSec=1s
 
-[X-Fleet]
-Conflicts=jsonip*
+[Install]
+WantedBy=multi-user.target

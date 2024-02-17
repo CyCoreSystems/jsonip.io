@@ -2,12 +2,29 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
+
+	"golang.org/x/crypto/acme/autocert"
 )
+
+var enableTLS bool
+var listenPort uint
+
+var listenDomains = []string{
+	"jsonip.io",
+	"ipv4.jsonip.io",
+	"ipv6.jsonip.io",
+}
+
+func init() {
+	flag.BoolVar(&enableTLS, "tls", false, "whether to enable TLS")
+	flag.UintVar(&listenPort, "port", 8080, "port on which to listen for HTTP traffic")
+}
 
 type Response struct {
 	Address   string `json:"address"`
@@ -18,23 +35,25 @@ type Response struct {
 }
 
 func main() {
-	// Determine port
-	port := "8080"
-	if os.Getenv("PORT") != "" {
-		port = os.Getenv("PORT")
-	}
+	flag.Parse()
 
 	// Attach handlers
 	http.HandleFunc("/usage", Usage)
 	http.HandleFunc("/", ReturnIP)
 
-	// Listen
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	if enableTLS {
+		go func() {
+			// Listen on HTTPS, with autocert
+			log.Fatal("failed to start TLS server: ",http.Serve(autocert.NewListener(listenDomains...), nil))
+		}()
+	}
+
+	// Listen on HTTP
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d",listenPort), nil))
 }
 
 func Usage(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte(`
-	<html>
+	if _, err := w.Write([]byte(`<html>
 	<body>
 	<h1>jsonip.io</h1>
 	<p>Returns JSON indicating the IP address and version of the client</p>
@@ -57,14 +76,18 @@ func Usage(w http.ResponseWriter, r *http.Request) {
 	<p>Service provided by <a href="http://cycoresys.com">CyCore Systems, Inc</a>.</p>
 	</body>
 	</html>
-	`))
-	return
+		`)); err != nil {
+		log.Printf("error: failed to write help to requester: %s", err.Error())
+	}
 }
 
 func ReturnIP(w http.ResponseWriter, r *http.Request) {
 	var canceled bool
-	resp := Response{}
-	resp.Usage = "http://jsonip.io/usage"
+
+	resp := Response{
+		Usage:  "http://jsonip.io/usage", 
+	}
+
 	defer func() {
 		if canceled {
 			// Response already handled
@@ -78,7 +101,9 @@ func ReturnIP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Write(respBytes)
+
+		w.Write(respBytes) //nolint: errcheck
+
 		log.Printf("{ \"Address\": \"%s\", \"Version\": %d }", resp.Address, resp.Version)
 	}()
 
@@ -90,6 +115,7 @@ func ReturnIP(w http.ResponseWriter, r *http.Request) {
 		resp.Error = "Failed to determine IP address"
 		return
 	}
+
 	resp.Address = ip.String()
 
 	// Determine IP version
@@ -114,9 +140,6 @@ func ReturnIP(w http.ResponseWriter, r *http.Request) {
 		canceled = true
 		return
 	}
-
-	// All is well
-	return
 }
 
 // isIPv6Request returns true if the request was
