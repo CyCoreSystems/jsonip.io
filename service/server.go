@@ -1,55 +1,31 @@
-package main
+package service
 
 import (
+	"crypto/tls"
 	"encoding/json"
-	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
-
-	"golang.org/x/crypto/acme/autocert"
 )
 
-var enableTLS bool
-var listenPort uint
-
-var listenDomains = []string{
-	"jsonip.io",
-	"ipv4.jsonip.io",
-	"ipv6.jsonip.io",
-}
-
-func init() {
-	flag.BoolVar(&enableTLS, "tls", false, "whether to enable TLS")
-	flag.UintVar(&listenPort, "port", 8080, "port on which to listen for HTTP traffic")
-}
-
+// Response is the the structure of the response sent from the server.
 type Response struct {
 	Address   string `json:"address"`
 	Version   int    `json:"version"`
-	Error     string `json:"error"`
-	ErrorCode int    `json:"errorCode"`
+	Error     string `json:"error,omitempty"`
+	ErrorCode int    `json:"errorCode,omitempty"`
 	Usage     string `json:"usage"`
 }
 
-func main() {
-	flag.Parse()
+func NewServer() *http.ServeMux {
+	mux := http.NewServeMux()
 
-	// Attach handlers
-	http.HandleFunc("/usage", Usage)
-	http.HandleFunc("/", ReturnIP)
+	mux.HandleFunc("/", ReturnIP)
+	mux.HandleFunc("/usage", Usage)
 
-	if enableTLS {
-		go func() {
-			// Listen on HTTPS, with autocert
-			log.Fatal("failed to start TLS server: ",http.Serve(autocert.NewListener(listenDomains...), nil))
-		}()
-	}
-
-	// Listen on HTTP
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d",listenPort), nil))
+	return mux
 }
 
 func Usage(w http.ResponseWriter, r *http.Request) {
@@ -75,9 +51,9 @@ func Usage(w http.ResponseWriter, r *http.Request) {
 	</pre>
 	<p>Service provided by <a href="http://cycoresys.com">CyCore Systems, Inc</a>.</p>
 	</body>
-	</html>
+</html>
 		`)); err != nil {
-		log.Printf("error: failed to write help to requester: %s", err.Error())
+		slog.Error("failed to write help to requester:", err)
 	}
 }
 
@@ -85,7 +61,7 @@ func ReturnIP(w http.ResponseWriter, r *http.Request) {
 	var canceled bool
 
 	resp := Response{
-		Usage:  "http://jsonip.io/usage", 
+		Usage: "http://jsonip.io/usage",
 	}
 
 	defer func() {
@@ -104,15 +80,19 @@ func ReturnIP(w http.ResponseWriter, r *http.Request) {
 
 		w.Write(respBytes) //nolint: errcheck
 
-		log.Printf("{ \"Address\": \"%s\", \"Version\": %d }", resp.Address, resp.Version)
+		slog.Debug("handled request",
+			slog.String("address", resp.Address),
+			slog.Int("version", resp.Version),
+		)
 	}()
 
 	// Get the IP address
 	ip := GetIP(r)
+
 	if ip == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		resp.ErrorCode = 1
-		resp.Error = "Failed to determine IP address"
+		resp.Error = "failed to determine IP address"
 		return
 	}
 
@@ -122,24 +102,48 @@ func ReturnIP(w http.ResponseWriter, r *http.Request) {
 	resp.Version = GetVersion(ip)
 	if resp.Version == 0 {
 		w.WriteHeader(http.StatusInternalServerError)
+
 		resp.ErrorCode = 2
-		resp.Error = "Failed to determine IP version"
+
+		resp.Error = "failed to determine IP version"
+
 		return
 	}
 
 	// Handle version requests
 	if isIPv6Request(r) && resp.Version != 6 {
-		log.Println("Redirecting request to v6")
-		http.Redirect(w, r, "http://ipv6.jsonip.io", 301)
+		slog.Debug("redirecting request to v6")
+
+		http.Redirect(w, r, RedirectURL(true, r.TLS), http.StatusTemporaryRedirect)
+
 		canceled = true
+
 		return
 	}
 	if isIPv4Request(r) && resp.Version != 4 {
-		log.Println("Redirecting request to v4")
-		http.Redirect(w, r, "http://ipv4.jsonip.io", 301)
+		slog.Debug("redirecting request to v4")
+
+		http.Redirect(w, r, RedirectURL(false, r.TLS), http.StatusTemporaryRedirect)
+
 		canceled = true
+
 		return
 	}
+}
+
+// RedirectURL constructs the redirection URL.
+func RedirectURL(toV6 bool, tls *tls.ConnectionState) string {
+	scheme := "http"
+	if tls != nil {
+		scheme = "https"
+	}
+
+	prefix := "ipv4"
+	if toV6 {
+		prefix = "ipv6"
+	}
+
+	return fmt.Sprintf("%s://%s.jsonip.io", scheme, prefix)
 }
 
 // isIPv6Request returns true if the request was
